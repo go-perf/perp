@@ -6,8 +6,12 @@ import (
 )
 
 type Cache[K comparable, V any] struct {
-	values  *Values[safeCache[K, V]]
-	maxSize int
+	maxSizePerP int
+	pool        *sync.Pool
+}
+
+type cacheStripe[K comparable, V any] struct {
+	cache map[K]V
 }
 
 func NewCache[K comparable, V any](maxSizePerP int) (*Cache[K, V], error) {
@@ -16,46 +20,34 @@ func NewCache[K comparable, V any](maxSizePerP int) (*Cache[K, V], error) {
 	}
 
 	c := &Cache[K, V]{
-		maxSize: maxSizePerP,
-		values: NewValues(func() safeCache[K, V] {
-			return safeCache[K, V]{
-				data: make(map[K]V, maxSizePerP),
-			}
-		}),
+		maxSizePerP: maxSizePerP,
+		pool: &sync.Pool{
+			New: func() interface{} {
+				return &cacheStripe[K, V]{
+					cache: make(map[K]V),
+				}
+			},
+		},
 	}
 	return c, nil
 }
 
 func (c *Cache[K, V]) Load(key K) (V, bool) {
-	cache := c.values.Get()
-	return cache.Get(key)
+	stripe := c.pool.Get().(*cacheStripe[K, V])
+	defer c.pool.Put(stripe)
+	value, ok := stripe.cache[key]
+	return value, ok
 }
 
 func (c *Cache[K, V]) Store(key K, value V) {
-	cache := c.values.Get()
-	cache.Set(c.maxSize, key, value)
-}
+	stripe := c.pool.Get().(*cacheStripe[K, V])
+	defer c.pool.Put(stripe)
 
-type safeCache[K comparable, V any] struct {
-	sync.RWMutex
-	data map[K]V
-}
-
-func (sc *safeCache[K, V]) Get(key K) (V, bool) {
-	sc.RLock()
-	defer sc.RUnlock()
-	v, ok := sc.data[key]
-	return v, ok
-}
-
-func (sc *safeCache[K, V]) Set(maxsize int, key K, value V) {
-	sc.Lock()
-	defer sc.Unlock()
-	if len(sc.data) == maxsize {
-		for k := range sc.data {
-			delete(sc.data, k)
+	stripe.cache[key] = value
+	if len(stripe.cache) > c.maxSizePerP {
+		for k := range stripe.cache {
+			delete(stripe.cache, k)
 			break
 		}
 	}
-	sc.data[key] = value
 }
